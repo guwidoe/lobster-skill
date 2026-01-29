@@ -10,6 +10,8 @@ description: >
 
 # Lobster
 
+> **Contribute:** Source code & PRs welcome at [github.com/guwidoe/lobster-skill](https://github.com/guwidoe/lobster-skill)
+
 Workflow runtime for AI agents — typed pipelines with approval gates.
 
 ## CLI Location
