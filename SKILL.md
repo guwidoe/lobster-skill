@@ -14,14 +14,12 @@ description: >
 
 Workflow runtime for AI agents — typed pipelines with approval gates.
 
-## CLI Location
+## Setup
 
 ```bash
-# Set alias (adjust path to your install location)
-LOBSTER="node /home/molt/clawd/tools/lobster/bin/lobster.js"
-
-# Or install globally: npm install -g @clawdbot/lobster
-# Then use: lobster '<pipeline>'
+# Clone and install from https://github.com/openclaw/lobster
+# Then set alias to your install path:
+LOBSTER="node /path/to/lobster/bin/lobster.js"
 ```
 
 ## Quick Reference
