@@ -135,6 +135,268 @@ $LOBSTER 'clawd.invoke --tool message --action send --args-json "{\"target\":\"1
 
 Requires `CLAWD_URL` and `CLAWD_TOKEN` environment variables.
 
+## Complete Example: Email Triage Workflow
+
+This example shows a practical email triage workflow that:
+1. Fetches unread emails via Clawdbot's email tools
+2. Filters by sender domain
+3. Requires approval before taking action
+4. Marks emails as processed using stateful tracking
+
+### The Pipeline
+
+```bash
+# Email triage: fetch unread → filter important → approve → mark read
+$LOBSTER run --mode tool '
+  clawd.invoke --tool email --action list --args-json "{\"folder\":\"inbox\",\"unread\":true,\"limit\":20}" |
+  where "from contains @important-client.com" |
+  diff.last --key "email:triage:important-client" |
+  approve --prompt "Mark these emails as triaged?" |
+  clawd.invoke --tool email --action mark_read --stdin-ids
+'
+```
+
+### Step-by-Step Breakdown
+
+**Step 1: Fetch unread emails**
+```bash
+clawd.invoke --tool email --action list --args-json "{\"folder\":\"inbox\",\"unread\":true,\"limit\":20}"
+```
+Returns JSON array: `[{"id":"abc","from":"alice@important-client.com","subject":"Q3 Review"}, ...]`
+
+**Step 2: Filter by sender**
+```bash
+where "from contains @important-client.com"
+```
+Keeps only emails from the important client domain.
+
+**Step 3: Diff against last run**
+```bash
+diff.last --key "email:triage:important-client"
+```
+Compares current results to last run. Only emits items that are **new** since last triage. This prevents re-processing the same emails.
+
+**Step 4: Approve before action**
+```bash
+approve --prompt "Mark these emails as triaged?"
+```
+Pipeline halts here. Returns:
+```json
+{
+  "status": "needs_approval",
+  "requiresApproval": {
+    "prompt": "Mark these emails as triaged?",
+    "items": [{"id":"abc","from":"alice@important-client.com","subject":"Q3 Review"}],
+    "resumeToken": "eyJ..."
+  }
+}
+```
+
+The agent presents this to the human. Human says yes/no.
+
+**Step 5: Resume and execute**
+```bash
+$LOBSTER resume --token "eyJ..." --approve yes
+```
+If approved, continues to the `mark_read` action.
+
+### Workflow File Version
+
+For reusable workflows, save as `email-triage.lobster`:
+
+```yaml
+name: email-triage
+description: Triage emails from important senders
+args:
+  sender_domain:
+    required: true
+    description: Domain to filter (e.g., "@client.com")
+  folder:
+    default: inbox
+
+steps:
+  - id: fetch
+    run: |
+      clawd.invoke --tool email --action list \
+        --args-json '{"folder":"${folder}","unread":true,"limit":50}'
+    
+  - id: filter
+    stdin: $fetch
+    run: where "from contains ${sender_domain}"
+    
+  - id: diff
+    stdin: $filter
+    run: diff.last --key "email:triage:${sender_domain}"
+    
+  - id: approve
+    stdin: $diff
+    run: approve --prompt "Process ${count} emails from ${sender_domain}?"
+    skip_if_empty: true
+    
+  - id: mark
+    stdin: $approve
+    run: |
+      clawd.invoke --tool email --action mark_read --stdin-ids
+```
+
+Run it:
+```bash
+$LOBSTER run email-triage.lobster --args-json '{"sender_domain":"@important-client.com"}'
+```
+
+### Key Patterns Demonstrated
+
+| Pattern | Commands Used | Purpose |
+|---------|---------------|---------|
+| **Stateful diffing** | `diff.last --key` | Only process new items since last run |
+| **Approval gate** | `approve --prompt` | Human confirms before side effects |
+| **Tool integration** | `clawd.invoke` | Call Clawdbot email tools from pipeline |
+| **Filtering** | `where` | Narrow down to relevant items |
+
+### Adapting for Other Use Cases
+
+**Newsletter cleanup:**
+```bash
+$LOBSTER '... | where "from contains @newsletter" | approve --prompt "Archive these?" | clawd.invoke --tool email --action archive --stdin-ids'
+```
+
+**Flag for follow-up:**
+```bash
+$LOBSTER '... | where "subject contains URGENT" | approve --prompt "Flag these as important?" | clawd.invoke --tool email --action flag --stdin-ids'
+```
+
+---
+
+## Troubleshooting
+
+### "Command not found" or "lobster: not found"
+
+**Symptom:** Running `$LOBSTER` returns error.
+
+**Cause:** The alias isn't set, or the path is wrong.
+
+**Fix:**
+```bash
+# Check if the file exists
+ls -la ~/clawd/tools/lobster/bin/lobster.js
+
+# Set the alias with correct path
+LOBSTER="node /path/to/lobster/bin/lobster.js"
+
+# Or install globally
+npm install -g @clawdbot/lobster
+```
+
+### State directory permission errors
+
+**Symptom:** `EACCES: permission denied` when running pipelines with `diff.last` or `state.set`.
+
+**Cause:** Lobster can't write to `~/.lobster/state/`.
+
+**Fix:**
+```bash
+# Create directory with correct permissions
+mkdir -p ~/.lobster/state
+chmod 755 ~/.lobster/state
+
+# Or override with writable location
+export LOBSTER_STATE_DIR=/tmp/lobster-state
+```
+
+### Approval token expired or invalid
+
+**Symptom:** `resume` fails with "invalid token" or "token expired".
+
+**Cause:** Approval tokens expire after 24 hours by default. Or the token was corrupted during copy/paste.
+
+**Fix:**
+```bash
+# Re-run the original pipeline to get a fresh token
+$LOBSTER run --mode tool 'your-pipeline-here'
+
+# Make sure token is quoted properly (contains special chars)
+$LOBSTER resume --token "eyJ..." --approve yes
+```
+
+**Prevention:** Process approvals promptly. Don't let them sit overnight.
+
+### JSON parsing errors
+
+**Symptom:** `Unexpected token` or `JSON parse error` in pipeline output.
+
+**Cause:** A command in the pipeline returned non-JSON output, or the JSON is malformed.
+
+**Fix:**
+```bash
+# Debug: run each step separately
+$LOBSTER 'exec --json --shell "your-command"' 
+# Check: is stdout valid JSON?
+
+# Common issue: command outputs extra text before JSON
+# Fix: use jq or grep to extract JSON portion
+$LOBSTER 'exec --json --shell "your-command | tail -1"'
+```
+
+**Tip:** Use `--json` flag with `exec` to enforce JSON parsing. Without it, output is treated as plain text.
+
+### Pipeline hangs or times out
+
+**Symptom:** Pipeline doesn't return, or returns after long delay.
+
+**Cause:** Usually a shell command inside `exec` is hanging (waiting for input, network timeout, etc.).
+
+**Fix:**
+```bash
+# Add timeout to shell commands
+$LOBSTER 'exec --json --shell "timeout 30 your-command"'
+
+# Check if command works standalone
+your-command  # Does it hang by itself?
+
+# For network commands, check connectivity
+curl -I https://api.github.com
+```
+
+### diff.last always returns all items
+
+**Symptom:** `diff.last` never filters anything, always shows full list.
+
+**Cause:** The `--key` is different each run, or state was cleared.
+
+**Fix:**
+```bash
+# Use consistent keys
+diff.last --key "my-workflow:consistent-name"  # Good
+diff.last --key "my-workflow:$(date)"          # Bad - different every time
+
+# Check state directory
+ls ~/.lobster/state/
+
+# Clear state to reset (if needed)
+rm ~/.lobster/state/my-key.json
+```
+
+### clawd.invoke fails with connection error
+
+**Symptom:** `ECONNREFUSED` or "Clawdbot not available".
+
+**Cause:** Environment variables not set, or Clawdbot gateway not running.
+
+**Fix:**
+```bash
+# Check required env vars
+echo $CLAWD_URL   # Should be http://localhost:PORT
+echo $CLAWD_TOKEN # Should be set
+
+# Check if gateway is running
+curl $CLAWD_URL/health
+
+# Restart gateway if needed
+openclaw gateway restart
+```
+
+---
+
 ## State Directory
 
 Lobster stores state in `~/.lobster/state/` by default. Override with `LOBSTER_STATE_DIR`.
